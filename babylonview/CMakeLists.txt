@@ -101,6 +101,13 @@ FetchContent_Declare(BabylonNative
 
 FetchContent_MakeAvailable(BabylonNative)
 
+# The pinned ASTC encoder enables the 64-bit POPCNT intrinsic whenever the
+# compiler advertises POPCNT, including 32-bit x86 where that intrinsic is not
+# available. Use its portable fallback for that ABI.
+if(ANDROID_ABI STREQUAL "x86" AND TARGET bimg)
+    target_compile_definitions(bimg PRIVATE ASTCENC_POPCNT=0)
+endif()
+
 # --- Our own Android JNI interop layer (multiview) ---------------------------
 # Build libBabylonNativeEmbedding.so from the local multiview JNI source instead
 # of upstream's Embedding/Android target (disabled above). It links against the

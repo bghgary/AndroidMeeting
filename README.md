@@ -153,3 +153,42 @@ BabylonNative.runtimeLoadScript(runtime, "app:///scene.js");
 BabylonView view = new BabylonView(this, runtime);
 setContentView(view);
 ```
+
+## Updating meeting-stage state from Java
+
+The Java binding can pass a typed meeting-stage snapshot to JavaScript without
+serializing JSON or evaluating generated JavaScript:
+
+```js
+globalThis.setMeetingStageState = (state) => {
+    // state.stageId
+    // state.layout
+    // state.activeSpeakerId (number or null)
+    // state.participants[]: { id, displayName, muted, videoOn }
+};
+
+globalThis.resetMeetingStage = (stageId) => {
+    // Discard state belonging to stageId.
+};
+```
+
+```java
+BabylonNative.runtimeLoadScript(runtime, "app:///scene.js");
+BabylonNative.runtimeSetMeetingStageState(
+        runtime,
+        "stage-1",
+        7,
+        42,
+        new BabylonNative.MeetingStageParticipantState[] {
+            new BabylonNative.MeetingStageParticipantState(42, "Ada", true, true)
+        });
+```
+
+`runtimeSetMeetingStageState` creates the JavaScript object and participant
+array directly with Node-API. `runtimeResetMeetingStage` passes the stage ID as
+a JavaScript string. Both calls run on the runtime's JavaScript thread and are
+serialized behind scripts and state changes queued earlier for that runtime.
+Queue the script that installs both functions before sending state. Missing
+functions and JavaScript exceptions are reported through the runtime's
+uncaught-JavaScript error handler. Invalid Java arguments and invalid or
+destroyed runtime handles throw Java exceptions synchronously.

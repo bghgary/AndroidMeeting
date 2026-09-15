@@ -28,6 +28,27 @@ import android.view.Surface;
  */
 public final class BabylonNative {
     /**
+     * One participant in a meeting-stage state update.
+     */
+    public static final class MeetingStageParticipantState {
+        public final int id;
+        public final String displayName;
+        public final boolean muted;
+        public final boolean videoOn;
+
+        public MeetingStageParticipantState(
+                int id, String displayName, boolean muted, boolean videoOn) {
+            if (displayName == null) {
+                throw new IllegalArgumentException("displayName must not be null.");
+            }
+            this.id = id;
+            this.displayName = displayName;
+            this.muted = muted;
+            this.videoOn = videoOn;
+        }
+    }
+
+    /**
      * Construction options. Defaults match the C++
      * {@code Babylon::Embedding::RuntimeOptions}. Fields are public for
      * simple object-initializer patterns.
@@ -102,6 +123,43 @@ public final class BabylonNative {
     public static native void runtimeLoadShaderCache(long handle, String assetName);
 
     public static native void runtimeEval(long handle, String source, String sourceUrl);
+
+    /**
+     * Set the current meeting-stage state without evaluating generated
+     * JavaScript source.
+     *
+     * <p>The initial script must define
+     * {@code globalThis.setMeetingStageState(state)}. The state object has
+     * {@code stageId}, {@code layout}, nullable {@code activeSpeakerId}, and a
+     * {@code participants} array. Each participant has {@code id},
+     * {@code displayName}, {@code muted}, and {@code videoOn}.
+     *
+     * <p>The call is serialized behind scripts and state changes previously
+     * queued through this Runtime, so call it after
+     * {@link #runtimeLoadScript(long, String)} queues the script that installs
+     * the function.
+     *
+     * <p>Throws {@link IllegalArgumentException} for invalid arguments and
+     * {@link IllegalStateException} for an invalid or destroyed Runtime handle.
+     * A missing JavaScript function or an exception thrown by it is reported
+     * through the Runtime's uncaught-JavaScript error handler.
+     */
+    public static native void runtimeSetMeetingStageState(
+            long runtimeHandle,
+            String stageId,
+            int layout,
+            Integer activeSpeakerId,
+            MeetingStageParticipantState[] participants);
+
+    /**
+     * Reset a meeting stage by calling
+     * {@code globalThis.resetMeetingStage(stageId)} on the JavaScript thread.
+     *
+     * <p>The call has the same ordering and error behavior as
+     * {@link #runtimeSetMeetingStageState(long, String, int, Integer,
+     * MeetingStageParticipantState[])}.
+     */
+    public static native void runtimeResetMeetingStage(long runtimeHandle, String stageId);
 
     // No per-Runtime Suspend/Resume here: each Runtime auto-subscribes to
     // pause/resume in runtimeCreate. Hosts call those once per Activity

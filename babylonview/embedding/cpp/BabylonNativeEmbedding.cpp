@@ -20,6 +20,8 @@
 
 #include <AndroidExtensions/Globals.h>
 
+#include <napi/napi.h>
+
 #include <android/log.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
@@ -40,7 +42,10 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -49,6 +54,25 @@ namespace
     using Babylon::Embedding::Runtime;
     using Babylon::Embedding::RuntimeOptions;
     using Babylon::Embedding::View;
+
+    constexpr const char* SetMeetingStageStateFunctionName{"setMeetingStageState"};
+    constexpr const char* ResetMeetingStageFunctionName{"resetMeetingStage"};
+
+    struct MeetingStageParticipantState
+    {
+        int32_t id{};
+        std::string displayName{};
+        bool muted{};
+        bool videoOn{};
+    };
+
+    struct MeetingStageState
+    {
+        std::string stageId{};
+        int32_t layout{};
+        std::optional<int32_t> activeSpeakerId{};
+        std::vector<MeetingStageParticipantState> participants{};
+    };
 
     // Wraps a Runtime plus two `android::global` event tickets that
     // auto-Suspend/Resume on Activity lifecycle. Tickets are declared
@@ -82,6 +106,47 @@ namespace
     AndroidRuntime* AsAndroidRuntime(jlong handle) { return reinterpret_cast<AndroidRuntime*>(handle); }
     Runtime* AsRuntime(jlong handle) { return AsAndroidRuntime(handle)->runtime.get(); }
     View* AsView(jlong handle) { return reinterpret_cast<View*>(handle); }
+
+    std::mutex g_runtimeHandlesMutex;
+    std::unordered_set<AndroidRuntime*> g_runtimeHandles;
+
+    Napi::Function GetRequiredGlobalFunction(Napi::Env env, const char* name)
+    {
+        Napi::Value value = env.Global().Get(name);
+        if (!value.IsFunction())
+        {
+            throw Napi::TypeError::New(
+                env,
+                std::string{"globalThis."} + name + " must be a function before meeting-stage state is sent.");
+        }
+        return value.As<Napi::Function>();
+    }
+
+    Napi::Object BuildMeetingStageState(Napi::Env env, const MeetingStageState& state)
+    {
+        auto jsState = Napi::Object::New(env);
+        jsState.Set("stageId", Napi::String::New(env, state.stageId));
+        jsState.Set("layout", Napi::Number::New(env, state.layout));
+        jsState.Set(
+            "activeSpeakerId",
+            state.activeSpeakerId
+                ? Napi::Value{Napi::Number::New(env, *state.activeSpeakerId)}
+                : Napi::Value{env.Null()});
+
+        auto jsParticipants = Napi::Array::New(env, state.participants.size());
+        for (size_t index = 0; index < state.participants.size(); ++index)
+        {
+            const auto& participant = state.participants[index];
+            auto jsParticipant = Napi::Object::New(env);
+            jsParticipant.Set("id", Napi::Number::New(env, participant.id));
+            jsParticipant.Set("displayName", Napi::String::New(env, participant.displayName));
+            jsParticipant.Set("muted", Napi::Boolean::New(env, participant.muted));
+            jsParticipant.Set("videoOn", Napi::Boolean::New(env, participant.videoOn));
+            jsParticipants.Set(static_cast<uint32_t>(index), jsParticipant);
+        }
+        jsState.Set("participants", jsParticipants);
+        return jsState;
+    }
 
     // ---- Secondary-surface mirror (self-contained, GLES) ----
     // Each secondary SurfaceView gets its own EGL window surface + a context
@@ -224,6 +289,15 @@ namespace
         return result;
     }
 
+    void ThrowJavaException(JNIEnv* env, const char* className, const char* message)
+    {
+        jclass excClass = env->FindClass(className);
+        if (excClass != nullptr)
+        {
+            env->ThrowNew(excClass, message);
+        }
+    }
+
     // Throws a Java IllegalStateException. Used when a plugin wasn't
     // compiled in, so the misconfiguration surfaces as a clean Java
     // exception rather than UnsatisfiedLinkError or silent no-op.
@@ -231,11 +305,84 @@ namespace
     // branch references this and -Werror=unused-function would fail.
     [[maybe_unused]] void ThrowPluginNotEnabled(JNIEnv* env, const char* message)
     {
-        jclass excClass = env->FindClass("java/lang/IllegalStateException");
-        if (excClass != nullptr)
+        ThrowJavaException(env, "java/lang/IllegalStateException", message);
+    }
+
+    bool ReadJavaMeetingStageParticipants(
+        JNIEnv* env,
+        jobjectArray javaParticipants,
+        std::vector<MeetingStageParticipantState>& participants)
+    {
+        if (javaParticipants == nullptr)
         {
-            env->ThrowNew(excClass, message);
+            ThrowJavaException(env, "java/lang/IllegalArgumentException", "participants must not be null.");
+            return false;
         }
+
+        jclass participantClass =
+            env->FindClass("com/babylonjs/embedding/BabylonNative$MeetingStageParticipantState");
+        if (participantClass == nullptr)
+        {
+            return false;
+        }
+
+        jfieldID idField = env->GetFieldID(participantClass, "id", "I");
+        jfieldID displayNameField =
+            env->GetFieldID(participantClass, "displayName", "Ljava/lang/String;");
+        jfieldID mutedField = env->GetFieldID(participantClass, "muted", "Z");
+        jfieldID videoOnField = env->GetFieldID(participantClass, "videoOn", "Z");
+        if (idField == nullptr || displayNameField == nullptr ||
+            mutedField == nullptr || videoOnField == nullptr)
+        {
+            env->DeleteLocalRef(participantClass);
+            return false;
+        }
+
+        const jsize count = env->GetArrayLength(javaParticipants);
+        participants.reserve(static_cast<size_t>(count));
+        for (jsize index = 0; index < count; ++index)
+        {
+            jobject javaParticipant = env->GetObjectArrayElement(javaParticipants, index);
+            if (javaParticipant == nullptr)
+            {
+                env->DeleteLocalRef(participantClass);
+                ThrowJavaException(
+                    env,
+                    "java/lang/IllegalArgumentException",
+                    "participants must not contain null elements.");
+                return false;
+            }
+
+            auto displayName =
+                static_cast<jstring>(env->GetObjectField(javaParticipant, displayNameField));
+            if (displayName == nullptr)
+            {
+                env->DeleteLocalRef(javaParticipant);
+                env->DeleteLocalRef(participantClass);
+                ThrowJavaException(
+                    env,
+                    "java/lang/IllegalArgumentException",
+                    "participant displayName must not be null.");
+                return false;
+            }
+
+            MeetingStageParticipantState participant{};
+            participant.id = static_cast<int32_t>(env->GetIntField(javaParticipant, idField));
+            participant.displayName = ToStdString(env, displayName);
+            participant.muted = env->GetBooleanField(javaParticipant, mutedField) == JNI_TRUE;
+            participant.videoOn = env->GetBooleanField(javaParticipant, videoOnField) == JNI_TRUE;
+            env->DeleteLocalRef(displayName);
+            env->DeleteLocalRef(javaParticipant);
+            if (env->ExceptionCheck())
+            {
+                env->DeleteLocalRef(participantClass);
+                return false;
+            }
+            participants.push_back(std::move(participant));
+        }
+
+        env->DeleteLocalRef(participantClass);
+        return true;
     }
 
     bool ApplyJavaRuntimeOptions(JNIEnv* env, jobject javaOptions, RuntimeOptions& options)
@@ -365,6 +512,12 @@ namespace
             std::move(resumeTicket),
         }};
 
+        AndroidRuntime* wrapperPtr = wrapper.get();
+        {
+            std::lock_guard lock{g_runtimeHandlesMutex};
+            g_runtimeHandles.insert(wrapperPtr);
+        }
+
         // Ownership transfers to the JVM side via the returned jlong.
         return reinterpret_cast<jlong>(wrapper.release());
     }
@@ -486,9 +639,20 @@ Java_com_babylonjs_embedding_BabylonNative_runtimeCreate__Lcom_babylonjs_embeddi
 }
 
 JNIEXPORT void JNICALL
-Java_com_babylonjs_embedding_BabylonNative_runtimeDestroy(JNIEnv*, jclass, jlong handle)
+Java_com_babylonjs_embedding_BabylonNative_runtimeDestroy(JNIEnv* env, jclass, jlong handle)
 {
     AndroidRuntime* androidRuntime = AsAndroidRuntime(handle);
+    {
+        std::lock_guard lock{g_runtimeHandlesMutex};
+        if (androidRuntime == nullptr || g_runtimeHandles.erase(androidRuntime) == 0)
+        {
+            ThrowJavaException(
+                env,
+                "java/lang/IllegalStateException",
+                "runtimeDestroy received an invalid or destroyed Runtime handle.");
+            return;
+        }
+    }
 
 #if BABYLON_NATIVE_PLUGIN_NATIVEXR
     // Grab the XR window before tearing down the Runtime; it can only be
@@ -567,6 +731,140 @@ Java_com_babylonjs_embedding_BabylonNative_runtimeEval(
     JNIEnv* env, jclass, jlong handle, jstring source, jstring sourceUrl)
 {
     AsRuntime(handle)->Eval(ToStdString(env, source), ToStdString(env, sourceUrl));
+}
+
+JNIEXPORT void JNICALL
+Java_com_babylonjs_embedding_BabylonNative_runtimeSetMeetingStageState(
+    JNIEnv* env,
+    jclass,
+    jlong handle,
+    jstring stageId,
+    jint layout,
+    jobject activeSpeakerId,
+    jobjectArray participants)
+{
+    if (stageId == nullptr)
+    {
+        ThrowJavaException(env, "java/lang/IllegalArgumentException", "stageId must not be null.");
+        return;
+    }
+    if (participants == nullptr)
+    {
+        ThrowJavaException(env, "java/lang/IllegalArgumentException", "participants must not be null.");
+        return;
+    }
+
+    try
+    {
+        MeetingStageState state{};
+        state.stageId = ToStdString(env, stageId);
+        state.layout = static_cast<int32_t>(layout);
+        if (env->ExceptionCheck())
+        {
+            return;
+        }
+        if (state.stageId.empty())
+        {
+            ThrowJavaException(env, "java/lang/IllegalArgumentException", "stageId must not be empty.");
+            return;
+        }
+
+        if (activeSpeakerId != nullptr)
+        {
+            jclass integerClass = env->GetObjectClass(activeSpeakerId);
+            if (integerClass == nullptr)
+            {
+                return;
+            }
+            jmethodID intValue = env->GetMethodID(integerClass, "intValue", "()I");
+            if (intValue == nullptr)
+            {
+                env->DeleteLocalRef(integerClass);
+                return;
+            }
+            state.activeSpeakerId =
+                static_cast<int32_t>(env->CallIntMethod(activeSpeakerId, intValue));
+            env->DeleteLocalRef(integerClass);
+            if (env->ExceptionCheck())
+            {
+                return;
+            }
+        }
+
+        if (!ReadJavaMeetingStageParticipants(env, participants, state.participants))
+        {
+            return;
+        }
+
+        std::lock_guard lock{g_runtimeHandlesMutex};
+        AndroidRuntime* androidRuntime = AsAndroidRuntime(handle);
+        if (androidRuntime == nullptr || !g_runtimeHandles.contains(androidRuntime))
+        {
+            ThrowJavaException(
+                env,
+                "java/lang/IllegalStateException",
+                "runtimeSetMeetingStageState received an invalid or destroyed Runtime handle.");
+            return;
+        }
+
+        androidRuntime->runtime->RunOnJsThread(
+            [state = std::move(state)](Napi::Env jsEnv) {
+                GetRequiredGlobalFunction(jsEnv, SetMeetingStageStateFunctionName)
+                    .Call(jsEnv.Global(), {BuildMeetingStageState(jsEnv, state)});
+            },
+            true);
+    }
+    catch (const std::exception& exception)
+    {
+        ThrowJavaException(env, "java/lang/RuntimeException", exception.what());
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_babylonjs_embedding_BabylonNative_runtimeResetMeetingStage(
+    JNIEnv* env, jclass, jlong handle, jstring stageId)
+{
+    if (stageId == nullptr)
+    {
+        ThrowJavaException(env, "java/lang/IllegalArgumentException", "stageId must not be null.");
+        return;
+    }
+
+    try
+    {
+        std::string nativeStageId = ToStdString(env, stageId);
+        if (env->ExceptionCheck())
+        {
+            return;
+        }
+        if (nativeStageId.empty())
+        {
+            ThrowJavaException(env, "java/lang/IllegalArgumentException", "stageId must not be empty.");
+            return;
+        }
+
+        std::lock_guard lock{g_runtimeHandlesMutex};
+        AndroidRuntime* androidRuntime = AsAndroidRuntime(handle);
+        if (androidRuntime == nullptr || !g_runtimeHandles.contains(androidRuntime))
+        {
+            ThrowJavaException(
+                env,
+                "java/lang/IllegalStateException",
+                "runtimeResetMeetingStage received an invalid or destroyed Runtime handle.");
+            return;
+        }
+
+        androidRuntime->runtime->RunOnJsThread(
+            [stageId = std::move(nativeStageId)](Napi::Env jsEnv) {
+                GetRequiredGlobalFunction(jsEnv, ResetMeetingStageFunctionName)
+                    .Call(jsEnv.Global(), {Napi::String::New(jsEnv, stageId)});
+            },
+            true);
+    }
+    catch (const std::exception& exception)
+    {
+        ThrowJavaException(env, "java/lang/RuntimeException", exception.what());
+    }
 }
 
 // No per-Runtime Suspend/Resume on the JNI surface: lifecycle wiring
