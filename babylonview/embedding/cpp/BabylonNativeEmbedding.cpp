@@ -18,6 +18,8 @@
 #include <Babylon/Embedding/View.h>
 #include <Babylon/Embedding/Android/RuntimeHandle.h>
 
+#include "JniString.h"
+
 #include <AndroidExtensions/Globals.h>
 
 #include <napi/napi.h>
@@ -61,14 +63,14 @@ namespace
     struct MeetingStageParticipantState
     {
         int32_t id{};
-        std::string displayName{};
+        std::u16string displayName{};
         bool muted{};
         bool videoOn{};
     };
 
     struct MeetingStageState
     {
-        std::string stageId{};
+        std::u16string stageId{};
         int32_t layout{};
         std::optional<int32_t> activeSpeakerId{};
         std::vector<MeetingStageParticipantState> participants{};
@@ -368,7 +370,7 @@ namespace
 
             MeetingStageParticipantState participant{};
             participant.id = static_cast<int32_t>(env->GetIntField(javaParticipant, idField));
-            participant.displayName = ToStdString(env, displayName);
+            participant.displayName = Babylon::Embedding::Android::ToUtf16String(env, displayName);
             participant.muted = env->GetBooleanField(javaParticipant, mutedField) == JNI_TRUE;
             participant.videoOn = env->GetBooleanField(javaParticipant, videoOnField) == JNI_TRUE;
             env->DeleteLocalRef(displayName);
@@ -757,7 +759,7 @@ Java_com_babylonjs_embedding_BabylonNative_runtimeSetMeetingStageState(
     try
     {
         MeetingStageState state{};
-        state.stageId = ToStdString(env, stageId);
+        state.stageId = Babylon::Embedding::Android::ToUtf16String(env, stageId);
         state.layout = static_cast<int32_t>(layout);
         if (env->ExceptionCheck())
         {
@@ -832,7 +834,8 @@ Java_com_babylonjs_embedding_BabylonNative_runtimeResetMeetingStage(
 
     try
     {
-        std::string nativeStageId = ToStdString(env, stageId);
+        std::u16string nativeStageId =
+            Babylon::Embedding::Android::ToUtf16String(env, stageId);
         if (env->ExceptionCheck())
         {
             return;

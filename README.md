@@ -186,7 +186,9 @@ BabylonNative.runtimeSetMeetingStageState(
 
 `runtimeSetMeetingStageState` creates the JavaScript object and participant
 array directly with Node-API. `runtimeResetMeetingStage` passes the stage ID as
-a JavaScript string. Both calls run on the runtime's JavaScript thread and are
+a JavaScript string. Stage IDs and participant display names preserve their
+UTF-16 contents, including embedded nulls and supplementary characters. Both
+calls run on the runtime's JavaScript thread and are
 serialized behind scripts and state changes queued earlier for that runtime.
 Queue the script that installs both functions before sending state. Missing
 functions and JavaScript exceptions are reported through the runtime's
