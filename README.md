@@ -11,10 +11,9 @@ transparent 3D view.
   BabylonNative via CMake `FetchContent` and enables the cross-platform
   `Embedding` facade. Upstream's Android JNI layer is intentionally disabled;
   instead this repo builds its **own** `BabylonNativeEmbedding` target from a
-  local, multiview-capable JNI source
-  (`babylonview/embedding/cpp/BabylonNativeEmbedding.cpp`). That source is the
-  only file that diverges from upstream — it adds the secondary-surface **mirror**
-  API and an asset shader-cache loader — so it lives here rather than in a
+  local JNI layer (`babylonview/embedding/cpp`). It adds the secondary-surface
+  **mirror** API, asset shader-cache loading, and the meeting-video
+  external-texture bridge, so the integration lives here rather than in a
   BabylonNative fork.
 - **Java definitions**
   - `com.babylonjs.embedding.BabylonNative` — the JNI binding whose native
@@ -164,7 +163,8 @@ globalThis.setMeetingStageState = (state) => {
     // state.stageId
     // state.layout
     // state.activeSpeakerId (number or null)
-    // state.participants[]: { id, displayName, muted, videoOn }
+    // state.participants[]:
+    //   { id, displayName, muted, videoOn, videoObjectId }
 };
 
 globalThis.resetMeetingStage = (stageId) => {
@@ -180,7 +180,7 @@ BabylonNative.runtimeSetMeetingStageState(
         7,
         42,
         new BabylonNative.MeetingStageParticipantState[] {
-            new BabylonNative.MeetingStageParticipantState(42, "Ada", true, true)
+            new BabylonNative.MeetingStageParticipantState(42, "Ada", true, true, 84)
         });
 ```
 
@@ -194,3 +194,38 @@ Queue the script that installs both functions before sending state. Missing
 functions and JavaScript exceptions are reported through the runtime's
 uncaught-JavaScript error handler. Invalid Java arguments and invalid or
 destroyed runtime handles throw Java exceptions synchronously.
+
+## Supplying meeting video as external GPU textures
+
+The Android embedding can route a decoder into a `SurfaceTexture` owned by
+Babylon Native without reading pixels back to the CPU:
+
+```java
+SurfaceTexture surfaceTexture =
+        BabylonNative.runtimeCreateMeetingVideoSurfaceTexture(runtime, videoObjectId, 640, 360);
+textureView.setSurfaceTexture(surfaceTexture);
+BabylonNative.runtimeAttachMeetingVideoSurfaceTexture(runtime, videoObjectId);
+```
+
+Keep that `TextureView` detached from the Android view hierarchy. Its renderer
+may use the existing `SurfaceTexture` as a decoder target, while Babylon Native
+latches each frame and converts the external OES image to a wrapped 2D GPU
+texture. `BabylonView` calls
+`runtimeUpdateMeetingVideoTextures(runtime)` immediately before each
+`viewRenderFrame`; custom render loops must preserve that ordering. Call
+`runtimeReleaseMeetingVideoTexture(runtime, videoObjectId)` when the stream
+stops.
+
+The scene script must define these callbacks before a video surface is
+attached:
+
+```js
+globalThis.setMeetingStageVideoTexture =
+    (videoObjectId, nativeTexture, width, height) => {
+        // Wrap nativeTexture with engine.wrapNativeTexture(...).
+    };
+
+globalThis.clearMeetingStageVideoTexture = (videoObjectId) => {
+    // Dispose the Babylon texture bound to videoObjectId.
+};
+```

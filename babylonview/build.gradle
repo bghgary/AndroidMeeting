@@ -38,13 +38,14 @@ def cmakeArguments = [
     "-DBABYLON_NATIVE_EMBEDDING_ANDROID=OFF",
     "-DBABYLON_NATIVE_BUILD_APPS=OFF",
     "-DBABYLON_NATIVE_INSTALL=OFF",
-    // Disabled plugins / polyfills.
+    // Optional plugins / polyfills. ExternalTexture is required by the
+    // meeting-video SurfaceTexture bridge; the others remain disabled.
     "-DBABYLON_NATIVE_POLYFILL_CANVAS=OFF",
     "-DBABYLON_NATIVE_PLUGIN_NATIVECAMERA=OFF",
     "-DBABYLON_NATIVE_PLUGIN_NATIVECAPTURE=OFF",
     "-DBABYLON_NATIVE_PLUGIN_NATIVEXR=OFF",
     "-DBABYLON_NATIVE_PLUGIN_TESTUTILS=OFF",
-    "-DBABYLON_NATIVE_PLUGIN_EXTERNALTEXTURE=OFF",
+    "-DBABYLON_NATIVE_PLUGIN_EXTERNALTEXTURE=ON",
     "-DBABYLON_NATIVE_PLUGIN_NATIVETRACING=OFF",
     // Image loading (decode) and encoding are disabled in both flavors to shrink
     // the .so. The ShaderCache plugin is always enabled.

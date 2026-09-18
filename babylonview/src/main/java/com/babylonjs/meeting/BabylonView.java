@@ -142,6 +142,7 @@ public class BabylonView extends FrameLayout
     @Override
     protected void onDraw(Canvas canvas) {
         if (viewHandle != 0) {
+            BabylonNative.runtimeUpdateMeetingVideoTextures(runtimeHandle);
             BabylonNative.viewRenderFrame(viewHandle);
         }
         invalidate();

@@ -3,12 +3,11 @@
 # This build FETCHES upstream BabylonJS/BabylonNative and enables the
 # cross-platform `Embedding` facade (Runtime + View). Upstream's Android JNI
 # interop layer is NOT used; instead this module builds its OWN
-# `BabylonNativeEmbedding` shared library from a local, multiview-capable copy
-# of the JNI source (embedding/cpp/BabylonNativeEmbedding.cpp). That file adds
-# the secondary-surface mirror API (runtimeAddSecondarySurface /
-# runtimeRemoveSecondarySurface / runtimeMirrorFrame) and an asset shader-cache
-# loader on top of the upstream Embedding facade — the only source that needs to
-# diverge from upstream, so it lives here rather than in a BabylonNative fork.
+# `BabylonNativeEmbedding` shared library from a local JNI layer
+# (`embedding/cpp`). It adds the secondary-surface mirror API, asset
+# shader-cache loading, and the meeting-video external-texture bridge on top of
+# the upstream Embedding facade, so the integration stays here rather than in a
+# BabylonNative fork.
 #
 # The result is a single shared library:
 #
@@ -42,14 +41,14 @@ set(BABYLON_NATIVE_BUILD_APPS OFF CACHE BOOL "" FORCE)
 set(BABYLON_NATIVE_INSTALL OFF CACHE BOOL "" FORCE)
 
 # ARCore-backed and other unneeded plugins/polyfills are disabled to keep the
-# AAR lean and the build self-contained. NativeCamera/NativeXr would otherwise
-# require extracting the ARCore native libraries at build time.
+# AAR lean and the build self-contained. ExternalTexture remains enabled for
+# the meeting-video SurfaceTexture bridge.
 set(BABYLON_NATIVE_POLYFILL_CANVAS OFF CACHE BOOL "" FORCE)
 set(BABYLON_NATIVE_PLUGIN_NATIVECAMERA OFF CACHE BOOL "" FORCE)
 set(BABYLON_NATIVE_PLUGIN_NATIVECAPTURE OFF CACHE BOOL "" FORCE)
 set(BABYLON_NATIVE_PLUGIN_NATIVEXR OFF CACHE BOOL "" FORCE)
 set(BABYLON_NATIVE_PLUGIN_TESTUTILS OFF CACHE BOOL "" FORCE)
-set(BABYLON_NATIVE_PLUGIN_EXTERNALTEXTURE OFF CACHE BOOL "" FORCE)
+set(BABYLON_NATIVE_PLUGIN_EXTERNALTEXTURE ON CACHE BOOL "" FORCE)
 set(BABYLON_NATIVE_PLUGIN_NATIVETRACING OFF CACHE BOOL "" FORCE)
 
 # Image loading (decode) and image encoding are dropped in BOTH flavors to keep
@@ -114,7 +113,8 @@ endif()
 # upstream Embedding facade and uses upstream's unmodified Android platform
 # header (RuntimeHandle.h) from the fetched tree.
 add_library(BabylonNativeEmbedding SHARED
-    "${CMAKE_CURRENT_SOURCE_DIR}/embedding/cpp/BabylonNativeEmbedding.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/embedding/cpp/BabylonNativeEmbedding.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/embedding/cpp/MeetingVideoBridge.cpp")
 
 target_include_directories(BabylonNativeEmbedding PRIVATE
     "${babylonnative_SOURCE_DIR}/Embedding/Include/Platform/Android")
@@ -122,6 +122,7 @@ target_include_directories(BabylonNativeEmbedding PRIVATE
 target_link_libraries(BabylonNativeEmbedding
     PRIVATE Embedding          # cross-platform facade (propagates its public defs/includes)
     PRIVATE AndroidExtensions
+    PRIVATE GraphicsDeviceContext
     PRIVATE android            # ANativeWindow_fromSurface
     PRIVATE log
     PRIVATE EGL                # required by bgfx GL backend + secondary-surface mirror
@@ -133,6 +134,10 @@ target_link_libraries(BabylonNativeEmbedding
 # link it here too to bring in its header + symbols.
 if(TARGET ShaderCache)
     target_link_libraries(BabylonNativeEmbedding PRIVATE ShaderCache)
+endif()
+
+if(TARGET ExternalTexture)
+    target_link_libraries(BabylonNativeEmbedding PRIVATE ExternalTexture)
 endif()
 
 # --- Minimal-size linking ----------------------------------------------------

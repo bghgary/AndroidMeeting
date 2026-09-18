@@ -2,6 +2,7 @@ package com.babylonjs.embedding;
 
 import android.app.Activity;
 import android.content.Context;
+import android.graphics.SurfaceTexture;
 import android.view.Surface;
 
 /**
@@ -35,9 +36,19 @@ public final class BabylonNative {
         public final String displayName;
         public final boolean muted;
         public final boolean videoOn;
+        public final Integer videoObjectId;
 
         public MeetingStageParticipantState(
                 int id, String displayName, boolean muted, boolean videoOn) {
+            this(id, displayName, muted, videoOn, null);
+        }
+
+        public MeetingStageParticipantState(
+                int id,
+                String displayName,
+                boolean muted,
+                boolean videoOn,
+                Integer videoObjectId) {
             if (displayName == null) {
                 throw new IllegalArgumentException("displayName must not be null.");
             }
@@ -45,6 +56,7 @@ public final class BabylonNative {
             this.displayName = displayName;
             this.muted = muted;
             this.videoOn = videoOn;
+            this.videoObjectId = videoObjectId;
         }
     }
 
@@ -132,7 +144,8 @@ public final class BabylonNative {
      * {@code globalThis.setMeetingStageState(state)}. The state object has
      * {@code stageId}, {@code layout}, nullable {@code activeSpeakerId}, and a
      * {@code participants} array. Each participant has {@code id},
-     * {@code displayName}, {@code muted}, and {@code videoOn}.
+     * {@code displayName}, {@code muted}, {@code videoOn}, and nullable
+     * {@code videoObjectId}.
      *
      * <p>The call is serialized behind scripts and state changes previously
      * queued through this Runtime, so call it after
@@ -160,6 +173,28 @@ public final class BabylonNative {
      * MeetingStageParticipantState[])}.
      */
     public static native void runtimeResetMeetingStage(long runtimeHandle, String stageId);
+
+    /**
+     * Create a detached SurfaceTexture for one decoded meeting-video stream.
+     * The caller must install it on the SlimCore GLTextureView and then call
+     * {@link #runtimeAttachMeetingVideoSurfaceTexture(long, int)}.
+     */
+    public static native SurfaceTexture runtimeCreateMeetingVideoSurfaceTexture(
+            long runtimeHandle, int videoObjectId, int width, int height);
+
+    /**
+     * Attach a previously created meeting-video SurfaceTexture to Babylon's
+     * shared OpenGL context and publish its GPU texture to JavaScript.
+     */
+    public static native void runtimeAttachMeetingVideoSurfaceTexture(
+            long runtimeHandle, int videoObjectId);
+
+    /** Latch and convert pending meeting-video frames entirely on the GPU. */
+    public static native void runtimeUpdateMeetingVideoTextures(long runtimeHandle);
+
+    /** Stop publishing and release one meeting-video SurfaceTexture. */
+    public static native void runtimeReleaseMeetingVideoTexture(
+            long runtimeHandle, int videoObjectId);
 
     // No per-Runtime Suspend/Resume here: each Runtime auto-subscribes to
     // pause/resume in runtimeCreate. Hosts call those once per Activity

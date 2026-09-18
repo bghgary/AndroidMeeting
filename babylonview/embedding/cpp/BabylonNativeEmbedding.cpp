@@ -19,6 +19,7 @@
 #include <Babylon/Embedding/Android/RuntimeHandle.h>
 
 #include "JniString.h"
+#include "MeetingVideoBridge.h"
 
 #include <AndroidExtensions/Globals.h>
 
@@ -59,6 +60,8 @@ namespace
 
     constexpr const char* SetMeetingStageStateFunctionName{"setMeetingStageState"};
     constexpr const char* ResetMeetingStageFunctionName{"resetMeetingStage"};
+    constexpr const char* SetMeetingStageVideoTextureFunctionName{"setMeetingStageVideoTexture"};
+    constexpr const char* ClearMeetingStageVideoTextureFunctionName{"clearMeetingStageVideoTexture"};
 
     struct MeetingStageParticipantState
     {
@@ -66,6 +69,7 @@ namespace
         std::u16string displayName{};
         bool muted{};
         bool videoOn{};
+        std::optional<int32_t> videoObjectId{};
     };
 
     struct MeetingStageState
@@ -92,6 +96,7 @@ namespace
         std::unique_ptr<Runtime> runtime;
         android::global::AppStateChangedCallbackTicket pauseTicket;
         android::global::AppStateChangedCallbackTicket resumeTicket;
+        std::unique_ptr<Babylon::Embedding::Android::MeetingVideoBridge> meetingVideoBridge;
 
 #if BABYLON_NATIVE_PLUGIN_NATIVEXR
         // The ANativeWindow currently handed to Runtime::SetXrWindow.
@@ -144,6 +149,11 @@ namespace
             jsParticipant.Set("displayName", Napi::String::New(env, participant.displayName));
             jsParticipant.Set("muted", Napi::Boolean::New(env, participant.muted));
             jsParticipant.Set("videoOn", Napi::Boolean::New(env, participant.videoOn));
+            jsParticipant.Set(
+                "videoObjectId",
+                participant.videoObjectId
+                    ? Napi::Value{Napi::Number::New(env, *participant.videoObjectId)}
+                    : Napi::Value{env.Null()});
             jsParticipants.Set(static_cast<uint32_t>(index), jsParticipant);
         }
         jsState.Set("participants", jsParticipants);
@@ -333,9 +343,25 @@ namespace
             env->GetFieldID(participantClass, "displayName", "Ljava/lang/String;");
         jfieldID mutedField = env->GetFieldID(participantClass, "muted", "Z");
         jfieldID videoOnField = env->GetFieldID(participantClass, "videoOn", "Z");
+        jfieldID videoObjectIdField =
+            env->GetFieldID(participantClass, "videoObjectId", "Ljava/lang/Integer;");
         if (idField == nullptr || displayNameField == nullptr ||
-            mutedField == nullptr || videoOnField == nullptr)
+            mutedField == nullptr || videoOnField == nullptr || videoObjectIdField == nullptr)
         {
+            env->DeleteLocalRef(participantClass);
+            return false;
+        }
+
+        jclass integerClass = env->FindClass("java/lang/Integer");
+        if (integerClass == nullptr)
+        {
+            env->DeleteLocalRef(participantClass);
+            return false;
+        }
+        jmethodID intValue = env->GetMethodID(integerClass, "intValue", "()I");
+        if (intValue == nullptr)
+        {
+            env->DeleteLocalRef(integerClass);
             env->DeleteLocalRef(participantClass);
             return false;
         }
@@ -347,6 +373,7 @@ namespace
             jobject javaParticipant = env->GetObjectArrayElement(javaParticipants, index);
             if (javaParticipant == nullptr)
             {
+                env->DeleteLocalRef(integerClass);
                 env->DeleteLocalRef(participantClass);
                 ThrowJavaException(
                     env,
@@ -360,6 +387,7 @@ namespace
             if (displayName == nullptr)
             {
                 env->DeleteLocalRef(javaParticipant);
+                env->DeleteLocalRef(integerClass);
                 env->DeleteLocalRef(participantClass);
                 ThrowJavaException(
                     env,
@@ -373,16 +401,25 @@ namespace
             participant.displayName = Babylon::Embedding::Android::ToUtf16String(env, displayName);
             participant.muted = env->GetBooleanField(javaParticipant, mutedField) == JNI_TRUE;
             participant.videoOn = env->GetBooleanField(javaParticipant, videoOnField) == JNI_TRUE;
+            jobject videoObjectId = env->GetObjectField(javaParticipant, videoObjectIdField);
+            if (videoObjectId != nullptr)
+            {
+                participant.videoObjectId =
+                    static_cast<int32_t>(env->CallIntMethod(videoObjectId, intValue));
+                env->DeleteLocalRef(videoObjectId);
+            }
             env->DeleteLocalRef(displayName);
             env->DeleteLocalRef(javaParticipant);
             if (env->ExceptionCheck())
             {
+                env->DeleteLocalRef(integerClass);
                 env->DeleteLocalRef(participantClass);
                 return false;
             }
             participants.push_back(std::move(participant));
         }
 
+        env->DeleteLocalRef(integerClass);
         env->DeleteLocalRef(participantClass);
         return true;
     }
@@ -663,9 +700,12 @@ Java_com_babylonjs_embedding_BabylonNative_runtimeDestroy(JNIEnv* env, jclass, j
     ANativeWindow* xrWindow = androidRuntime->xrWindow;
 #endif
 
+    auto meetingVideoBridge = std::move(androidRuntime->meetingVideoBridge);
+
     // Reverse declaration order: tickets unsubscribe before the Runtime
     // is destroyed, so no callback fires on a dead Runtime.
     delete androidRuntime;
+    meetingVideoBridge.reset();
 
 #if BABYLON_NATIVE_PLUGIN_NATIVEXR
     if (xrWindow != nullptr)
@@ -861,6 +901,168 @@ Java_com_babylonjs_embedding_BabylonNative_runtimeResetMeetingStage(
             [stageId = std::move(nativeStageId)](Napi::Env jsEnv) {
                 GetRequiredGlobalFunction(jsEnv, ResetMeetingStageFunctionName)
                     .Call(jsEnv.Global(), {Napi::String::New(jsEnv, stageId)});
+            },
+            true);
+    }
+    catch (const std::exception& exception)
+    {
+        ThrowJavaException(env, "java/lang/RuntimeException", exception.what());
+    }
+}
+
+JNIEXPORT jobject JNICALL
+Java_com_babylonjs_embedding_BabylonNative_runtimeCreateMeetingVideoSurfaceTexture(
+    JNIEnv* env,
+    jclass,
+    jlong handle,
+    jint videoObjectId,
+    jint width,
+    jint height)
+{
+    try
+    {
+        std::lock_guard lock{g_runtimeHandlesMutex};
+        AndroidRuntime* androidRuntime = AsAndroidRuntime(handle);
+        if (androidRuntime == nullptr || !g_runtimeHandles.contains(androidRuntime))
+        {
+            ThrowJavaException(
+                env,
+                "java/lang/IllegalStateException",
+                "runtimeCreateMeetingVideoSurfaceTexture received an invalid or destroyed Runtime handle.");
+            return nullptr;
+        }
+
+        if (!androidRuntime->meetingVideoBridge)
+        {
+            androidRuntime->meetingVideoBridge =
+                std::make_unique<Babylon::Embedding::Android::MeetingVideoBridge>();
+        }
+
+        return androidRuntime->meetingVideoBridge->CreateSurfaceTexture(
+            env,
+            static_cast<int32_t>(videoObjectId),
+            static_cast<uint32_t>(width),
+            static_cast<uint32_t>(height));
+    }
+    catch (const std::exception& exception)
+    {
+        ThrowJavaException(env, "java/lang/RuntimeException", exception.what());
+        return nullptr;
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_babylonjs_embedding_BabylonNative_runtimeAttachMeetingVideoSurfaceTexture(
+    JNIEnv* env,
+    jclass,
+    jlong handle,
+    jint videoObjectId)
+{
+    try
+    {
+        std::lock_guard lock{g_runtimeHandlesMutex};
+        AndroidRuntime* androidRuntime = AsAndroidRuntime(handle);
+        if (androidRuntime == nullptr ||
+            !g_runtimeHandles.contains(androidRuntime) ||
+            !androidRuntime->meetingVideoBridge)
+        {
+            ThrowJavaException(
+                env,
+                "java/lang/IllegalStateException",
+                "runtimeAttachMeetingVideoSurfaceTexture received an invalid Runtime or video handle.");
+            return;
+        }
+
+        auto externalTexture =
+            androidRuntime->meetingVideoBridge->AttachSurfaceTexture(
+                env,
+                static_cast<int32_t>(videoObjectId));
+        androidRuntime->runtime->RunOnJsThread(
+            [
+                videoObjectId = static_cast<int32_t>(videoObjectId),
+                externalTexture = std::move(externalTexture)
+            ](Napi::Env jsEnv) {
+                auto nativeTexture = externalTexture.CreateForJavaScript(jsEnv);
+                GetRequiredGlobalFunction(jsEnv, SetMeetingStageVideoTextureFunctionName)
+                    .Call(
+                        jsEnv.Global(),
+                        {
+                            Napi::Number::New(jsEnv, videoObjectId),
+                            nativeTexture,
+                            Napi::Number::New(jsEnv, externalTexture.Width()),
+                            Napi::Number::New(jsEnv, externalTexture.Height()),
+                        });
+            },
+            true);
+    }
+    catch (const std::exception& exception)
+    {
+        ThrowJavaException(env, "java/lang/RuntimeException", exception.what());
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_babylonjs_embedding_BabylonNative_runtimeUpdateMeetingVideoTextures(
+    JNIEnv* env,
+    jclass,
+    jlong handle)
+{
+    try
+    {
+        std::lock_guard lock{g_runtimeHandlesMutex};
+        AndroidRuntime* androidRuntime = AsAndroidRuntime(handle);
+        if (androidRuntime == nullptr || !g_runtimeHandles.contains(androidRuntime))
+        {
+            ThrowJavaException(
+                env,
+                "java/lang/IllegalStateException",
+                "runtimeUpdateMeetingVideoTextures received an invalid or destroyed Runtime handle.");
+            return;
+        }
+
+        if (androidRuntime->meetingVideoBridge)
+        {
+            androidRuntime->meetingVideoBridge->Update(env);
+        }
+    }
+    catch (const std::exception& exception)
+    {
+        ThrowJavaException(env, "java/lang/RuntimeException", exception.what());
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_babylonjs_embedding_BabylonNative_runtimeReleaseMeetingVideoTexture(
+    JNIEnv* env,
+    jclass,
+    jlong handle,
+    jint videoObjectId)
+{
+    try
+    {
+        std::lock_guard lock{g_runtimeHandlesMutex};
+        AndroidRuntime* androidRuntime = AsAndroidRuntime(handle);
+        if (androidRuntime == nullptr || !g_runtimeHandles.contains(androidRuntime))
+        {
+            ThrowJavaException(
+                env,
+                "java/lang/IllegalStateException",
+                "runtimeReleaseMeetingVideoTexture received an invalid or destroyed Runtime handle.");
+            return;
+        }
+
+        if (!androidRuntime->meetingVideoBridge)
+        {
+            return;
+        }
+
+        androidRuntime->meetingVideoBridge->ReleaseSurfaceTexture(
+            env,
+            static_cast<int32_t>(videoObjectId));
+        androidRuntime->runtime->RunOnJsThread(
+            [videoObjectId = static_cast<int32_t>(videoObjectId)](Napi::Env jsEnv) {
+                GetRequiredGlobalFunction(jsEnv, ClearMeetingStageVideoTextureFunctionName)
+                    .Call(jsEnv.Global(), {Napi::Number::New(jsEnv, videoObjectId)});
             },
             true);
     }
